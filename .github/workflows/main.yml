@@ -48,9 +48,7 @@ jobs:
         if: env.CACHE_TOOLCHAIN == 'true'
         uses: HiGarfield/cachewrtbuild@main
         with:
-          # 开启 ccache，极大加速 C/C++ 代码的二次编译速度
           ccache: true
-          # 设置缓存唯一键，只要分支和设备大类不变，就能命中缓存
           mixkey: ponwrt-${{ env.REPO_BRANCH }}-airoha-an7581
           prefix: ${{ env.OPENWRT_PATH }}
 
