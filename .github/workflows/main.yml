@@ -1,253 +1,126 @@
-name: PonWrt AN7581 Build
+name: Build PonWrt for XG-040G-MD
 
 on:
   workflow_dispatch:
 
+# 赋予自动发布 Release 等操作所需的写入权限
 permissions:
   contents: write
 
 env:
+  REPO_URL: https://github.com/pbs05/ponwrt.git
+  REPO_BRANCH: master
   TZ: Asia/Shanghai
+  # 开启缓存功能
+  CACHE_TOOLCHAIN: true
 
 jobs:
-  build:
-    name: Build PonWrt AN7581
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
+  Build:
+    runs-on: ubuntu-22.04
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Checkout your fork
-      #    The workflow runs from the fork itself, so no hard-coded
-      #    upstream repository is needed.
-      # ------------------------------------------------------------
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@v5
         with:
-          fetch-depth: 1
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
 
-      # ------------------------------------------------------------
-      # 2. Show runner information
-      # ------------------------------------------------------------
-      - name: Check Runner
-        run: |
-          echo "========================================"
-          echo "Runner information"
-          echo "========================================"
-          echo "CPU: $(nproc)"
-          lscpu | grep -E 'Model name|Architecture|CPU\(s\)' || true
-          echo
-          free -h
-          echo
-          df -hT
-
-      # ------------------------------------------------------------
-      # 3. Install the build environment
-      #    This is the same one-click environment setup documented
-      #    by PonWrt.
-      # ------------------------------------------------------------
-      - name: Initialize Build Environment
+      - name: Initialization Environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo bash -c 'bash <(curl -fsSL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-
-          sudo -E apt-get update
-          sudo -E apt-get install -y \
-            dos2unix \
-            libfuse-dev
-
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo timedatectl set-timezone "$TZ"
 
-      # ------------------------------------------------------------
-      # 4. Add swap / reclaim runner storage
-      # ------------------------------------------------------------
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@v10
+      - name: Clone PonWrt Source Code
+        run: |
+          git clone --depth=1 -b $REPO_BRANCH$REPO_URL openwrt
+          cd openwrt
+          echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
+          echo "DATE=$(date +'\%Y\%m\%d')" >> $GITHUB_ENV
+          echo "RELEASE_TAG=PonWrt-XG-040G-MD-$(date +'\%Y\%m\%d\%H\%M')" >> $GITHUB_ENV
+
+      - name: Cache Toolchain & ccache
+        if: env.CACHE_TOOLCHAIN == 'true'
+        uses: HiGarfield/cachewrtbuild@main
         with:
-          swap-size-mb: 4096
-          temp-reserve-mb: 100
-          root-reserve-mb: 1024
-          remove-dotnet: true
-          remove-android: true
-          remove-haskell: true
-          remove-codeql: true
+          # 开启 ccache，极大加速 C/C++ 代码的二次编译速度
+          ccache: true
+          # 设置缓存唯一键，只要分支和设备大类不变，就能命中缓存
+          mixkey: ponwrt-${{ env.REPO_BRANCH }}-airoha-an7581
+          prefix: ${{ env.OPENWRT_PATH }}
 
-      # ------------------------------------------------------------
-      # 5. Verify this is the PonWrt tree we expect
-      # ------------------------------------------------------------
-      - name: Verify PonWrt Source Tree
+      - name: Install Feeds
         run: |
-          echo "========================================"
-          echo "Verify PonWrt source tree"
-          echo "========================================"
-
-          test -f Makefile
-          test -f feeds.conf.default
-          test -f configs/an7581.config
-          test -d target/linux/airoha
-          test -d package
-
-          echo "Repository : $GITHUB_REPOSITORY"
-          echo "Commit     : $GITHUB_SHA"
-          echo "Branch/ref : $GITHUB_REF_NAME"
-
-          echo
-          echo "PonWrt revision:"
-          git log -1 --format='Author: %an%nDate:   %ad%nCommit: %H%nSubject: %s' --date=iso
-
-          echo
-          echo "PON feeds:"
-          grep -E 'pon_drivers|pon_userspace' feeds.conf.default || true
-
-      # ------------------------------------------------------------
-      # 6. Update / install the feeds
-      #    PonWrt already defines its PON feeds in feeds.conf.default.
-      #    Do NOT inject another PON feed and do NOT patch EN7572 here.
-      # ------------------------------------------------------------
-      - name: Update Feeds
-        run: |
-          set -e
+          cd $OPENWRT_PATH
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ------------------------------------------------------------
-      # 7. Cache downloaded source archives
-      #    A cache hit skips most repeated downloads on later runs.
-      # ------------------------------------------------------------
-      - name: Cache DL Directory
-        uses: actions/cache@v4
-        with:
-          path: dl
-          key: ${{ runner.os }}-ponwrt-dl-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ponwrt-dl-
-
-      # ------------------------------------------------------------
-      # 8. Use PonWrt's own AN7581 configuration unchanged
-      # ------------------------------------------------------------
-      - name: Load PonWrt AN7581 Configuration
+      - name: Load XG-040G-MD Configuration
         run: |
-          set -e
-
+          cd $OPENWRT_PATH
+          
+          # 使用 PonWrt 作者提供的 AN7581 基础配置
           cp configs/an7581.config .config
+          
+          # 锁定设备为 XG-040G-MD
+          echo "CONFIG_TARGET_airoha=y" >> .config
+          echo "CONFIG_TARGET_airoha_an7581=y" >> .config
+          echo "CONFIG_TARGET_MULTI_PROFILE=y" >> .config
+          echo "CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y" >> .config
+          
+          # 开启 ccache 支持 (配合上面的缓存插件)
+          echo "CONFIG_CCACHE=y" >> .config
+          
           make defconfig
 
-          echo "========================================"
-          echo "Target configuration"
-          echo "========================================"
-
-          grep -E '^CONFIG_TARGET_airoha=' .config || true
-          grep -E '^CONFIG_TARGET_airoha_an7581=' .config || true
-          grep -E '^CONFIG_CPU_TYPE=' .config || true
-          grep -E '^CONFIG_LINUX_' .config || true
-
-          echo
-          echo "========================================"
-          echo "Selected AN7581 device profiles"
-          echo "========================================"
-
-          grep -E '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true
-
-          echo
-          echo "========================================"
-          echo "PON related packages"
-          echo "========================================"
-
-          grep -E \
-            '^CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' \
-            .config || true
-
-          echo
-          echo "========================================"
-          echo "NPU related packages"
-          echo "========================================"
-
-          grep -E \
-            '^CONFIG_PACKAGE_(airoha-en7581-npu-firmware|airoha-en7581-mt7996-npu-firmware|kmod-airoha-npu|luci-app-airoha-npu)=' \
-            .config || true
-
-      # ------------------------------------------------------------
-      # 9. Download all sources before the actual build
-      # ------------------------------------------------------------
-      - name: Download Sources
+      - name: Download DL Packages
         run: |
-          set -e
+          cd $OPENWRT_PATH
           make download -j8
+          find dl -size -1024c -exec rm -f {} \;
 
-          echo
-          echo "Checking suspiciously small downloaded files:"
-          find dl -type f -size -1024c -print || true
-
-      # ------------------------------------------------------------
-      # 10. Build exactly from the PonWrt tree.
-      #     No custom Makefile patch, no I2C workaround, no fzs tree.
-      # ------------------------------------------------------------
-      - name: Build Firmware
-        id: build
+      - name: Compile Firmware
+        id: compile
         run: |
-          set -o pipefail
-
-          echo "========================================"
-          echo "Build PonWrt AN7581"
-          echo "========================================"
-          echo "Threads: $(nproc)"
-          echo
-
-          make -j"$(nproc)" 2>&1 | tee build.log
-
-      # ------------------------------------------------------------
-      # 11. Show generated images
-      # ------------------------------------------------------------
-      - name: Collect Build Results
-        if: success()
-        run: |
-          set -e
-
-          TARGET_DIR="bin/targets/airoha/an7581"
-
-          echo "========================================"
-          echo "Generated firmware"
-          echo "========================================"
-
-          test -d "$TARGET_DIR"
-          ls -lah "$TARGET_DIR"
-
-          echo
-          echo "========================================"
-          echo "SHA256"
-          echo "========================================"
-
-          if [ -f "$TARGET_DIR/sha256sums" ]; then
-            cat "$TARGET_DIR/sha256sums"
+          cd $OPENWRT_PATH
+          THREADS="$(nproc)"
+          echo "开始编译 (线程数: $THREADS)..."
+          
+          if make -j"$THREADS"; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
           else
-            find "$TARGET_DIR" -type f -exec sha256sum {} +
+            echo "多线程编译失败，开始单线程详细日志编译..."
+            make -j1 V=s
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
 
-      # ------------------------------------------------------------
-      # 12. Upload all AN7581 target outputs.
-      # ------------------------------------------------------------
-      - name: Upload Firmware Artifact
-        if: success()
+      - name: Upload Firmware to Artifact
+        if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: ponwrt-an7581-${{ github.run_number }}
+          name: ${{ env.RELEASE_TAG }}
           path: |
-            bin/targets/airoha/an7581/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
+            ${{ env.OPENWRT_PATH }}/bin/targets/airoha/an7581/*
+          retention-days: 7
 
-      # ------------------------------------------------------------
-      # 13. Preserve the full build log when something fails.
-      # ------------------------------------------------------------
-      - name: Upload Build Log
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Create Release
+        if: steps.compile.outputs.status == 'success'
+        uses: ncipollo/release-action@v1
         with:
-          name: ponwrt-an7581-build-log-${{ github.run_number }}
-          path: |
-            build.log
-            .config
-          if-no-files-found: ignore
-          retention-days: 14
+          name: ${{ env.RELEASE_TAG }}
+          tag: ${{ env.RELEASE_TAG }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.OPENWRT_PATH }}/bin/targets/airoha/an7581/*
+          allowUpdates: true
+          replacesArtifacts: true
+          body: |
+            # PonWrt for Nokia XG-040G-MD
+            - 💻 源码分支：`${{ env.REPO_BRANCH }}`
+            - 🛠️ 包含特性：AN7581 底层驱动 + PON 支持
+            - ⚙️ 已开启 Ccache 编译缓存加速
