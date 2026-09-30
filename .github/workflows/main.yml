@@ -1,0 +1,253 @@
+name: PonWrt AN7581 Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    name: Build PonWrt AN7581
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout your fork
+      #    The workflow runs from the fork itself, so no hard-coded
+      #    upstream repository is needed.
+      # ------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ------------------------------------------------------------
+      # 2. Show runner information
+      # ------------------------------------------------------------
+      - name: Check Runner
+        run: |
+          echo "========================================"
+          echo "Runner information"
+          echo "========================================"
+          echo "CPU: $(nproc)"
+          lscpu | grep -E 'Model name|Architecture|CPU\(s\)' || true
+          echo
+          free -h
+          echo
+          df -hT
+
+      # ------------------------------------------------------------
+      # 3. Install the build environment
+      #    This is the same one-click environment setup documented
+      #    by PonWrt.
+      # ------------------------------------------------------------
+      - name: Initialize Build Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo bash -c 'bash <(curl -fsSL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
+          sudo -E apt-get update
+          sudo -E apt-get install -y \
+            dos2unix \
+            libfuse-dev
+
+          sudo timedatectl set-timezone "$TZ"
+
+      # ------------------------------------------------------------
+      # 4. Add swap / reclaim runner storage
+      # ------------------------------------------------------------
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@v10
+        with:
+          swap-size-mb: 4096
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+
+      # ------------------------------------------------------------
+      # 5. Verify this is the PonWrt tree we expect
+      # ------------------------------------------------------------
+      - name: Verify PonWrt Source Tree
+        run: |
+          echo "========================================"
+          echo "Verify PonWrt source tree"
+          echo "========================================"
+
+          test -f Makefile
+          test -f feeds.conf.default
+          test -f configs/an7581.config
+          test -d target/linux/airoha
+          test -d package
+
+          echo "Repository : $GITHUB_REPOSITORY"
+          echo "Commit     : $GITHUB_SHA"
+          echo "Branch/ref : $GITHUB_REF_NAME"
+
+          echo
+          echo "PonWrt revision:"
+          git log -1 --format='Author: %an%nDate:   %ad%nCommit: %H%nSubject: %s' --date=iso
+
+          echo
+          echo "PON feeds:"
+          grep -E 'pon_drivers|pon_userspace' feeds.conf.default || true
+
+      # ------------------------------------------------------------
+      # 6. Update / install the feeds
+      #    PonWrt already defines its PON feeds in feeds.conf.default.
+      #    Do NOT inject another PON feed and do NOT patch EN7572 here.
+      # ------------------------------------------------------------
+      - name: Update Feeds
+        run: |
+          set -e
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ------------------------------------------------------------
+      # 7. Cache downloaded source archives
+      #    A cache hit skips most repeated downloads on later runs.
+      # ------------------------------------------------------------
+      - name: Cache DL Directory
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ${{ runner.os }}-ponwrt-dl-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ponwrt-dl-
+
+      # ------------------------------------------------------------
+      # 8. Use PonWrt's own AN7581 configuration unchanged
+      # ------------------------------------------------------------
+      - name: Load PonWrt AN7581 Configuration
+        run: |
+          set -e
+
+          cp configs/an7581.config .config
+          make defconfig
+
+          echo "========================================"
+          echo "Target configuration"
+          echo "========================================"
+
+          grep -E '^CONFIG_TARGET_airoha=' .config || true
+          grep -E '^CONFIG_TARGET_airoha_an7581=' .config || true
+          grep -E '^CONFIG_CPU_TYPE=' .config || true
+          grep -E '^CONFIG_LINUX_' .config || true
+
+          echo
+          echo "========================================"
+          echo "Selected AN7581 device profiles"
+          echo "========================================"
+
+          grep -E '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true
+
+          echo
+          echo "========================================"
+          echo "PON related packages"
+          echo "========================================"
+
+          grep -E \
+            '^CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' \
+            .config || true
+
+          echo
+          echo "========================================"
+          echo "NPU related packages"
+          echo "========================================"
+
+          grep -E \
+            '^CONFIG_PACKAGE_(airoha-en7581-npu-firmware|airoha-en7581-mt7996-npu-firmware|kmod-airoha-npu|luci-app-airoha-npu)=' \
+            .config || true
+
+      # ------------------------------------------------------------
+      # 9. Download all sources before the actual build
+      # ------------------------------------------------------------
+      - name: Download Sources
+        run: |
+          set -e
+          make download -j8
+
+          echo
+          echo "Checking suspiciously small downloaded files:"
+          find dl -type f -size -1024c -print || true
+
+      # ------------------------------------------------------------
+      # 10. Build exactly from the PonWrt tree.
+      #     No custom Makefile patch, no I2C workaround, no fzs tree.
+      # ------------------------------------------------------------
+      - name: Build Firmware
+        id: build
+        run: |
+          set -o pipefail
+
+          echo "========================================"
+          echo "Build PonWrt AN7581"
+          echo "========================================"
+          echo "Threads: $(nproc)"
+          echo
+
+          make -j"$(nproc)" 2>&1 | tee build.log
+
+      # ------------------------------------------------------------
+      # 11. Show generated images
+      # ------------------------------------------------------------
+      - name: Collect Build Results
+        if: success()
+        run: |
+          set -e
+
+          TARGET_DIR="bin/targets/airoha/an7581"
+
+          echo "========================================"
+          echo "Generated firmware"
+          echo "========================================"
+
+          test -d "$TARGET_DIR"
+          ls -lah "$TARGET_DIR"
+
+          echo
+          echo "========================================"
+          echo "SHA256"
+          echo "========================================"
+
+          if [ -f "$TARGET_DIR/sha256sums" ]; then
+            cat "$TARGET_DIR/sha256sums"
+          else
+            find "$TARGET_DIR" -type f -exec sha256sum {} +
+          fi
+
+      # ------------------------------------------------------------
+      # 12. Upload all AN7581 target outputs.
+      # ------------------------------------------------------------
+      - name: Upload Firmware Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-an7581-${{ github.run_number }}
+          path: |
+            bin/targets/airoha/an7581/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      # ------------------------------------------------------------
+      # 13. Preserve the full build log when something fails.
+      # ------------------------------------------------------------
+      - name: Upload Build Log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-an7581-build-log-${{ github.run_number }}
+          path: |
+            build.log
+            .config
+          if-no-files-found: ignore
+          retention-days: 14
