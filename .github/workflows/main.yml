@@ -38,11 +38,11 @@ jobs:
 
       - name: Clone PonWrt Source Code
         run: |
-          git clone --depth=1 -b $REPO_BRANCH$REPO_URL openwrt
+          git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
           cd openwrt
           echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-          echo "DATE=$(date +'\%Y\%m\%d')" >> $GITHUB_ENV
-          echo "RELEASE_TAG=PonWrt-XG-040G-MD-$(date +'\%Y\%m\%d\%H\%M')" >> $GITHUB_ENV
+          echo "DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
+          echo "RELEASE_TAG=PonWrt-XG-040G-MD-$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
 
       - name: Cache Toolchain & ccache
         if: env.CACHE_TOOLCHAIN == 'true'
