@@ -12,85 +12,133 @@ concurrency:
 
 jobs:
   build:
+    name: Build LuCI AdGuardHome APK
     runs-on: ubuntu-22.04
     timeout-minutes: 240
+
     defaults:
       run:
         shell: bash
+
     env:
       REPO_URL: https://github.com/pbs05/ponwrt.git
       REPO_COMMIT: c3b518baec
       LUCI_REPO: https://github.com/kenzok78/luci-app-adguardhome.git
       TZ: Asia/Shanghai
+      DEBIAN_FRONTEND: noninteractive
 
     steps:
+
+      # ==========================================================
+      # 1. 安装编译环境
+      # ==========================================================
+
       - name: Install build prerequisites
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang flex bison gawk gettext git \
-            libncurses-dev libssl-dev libelf-dev zlib1g-dev \
-            python3 python3-setuptools python3-pyelftools python3-ply \
-            rsync unzip file wget curl subversion swig time patch perl \
-            autoconf automake autopoint libtool pkg-config cmake ninja-build \
-            g++-multilib gcc-multilib libgmp-dev libmpc-dev libmpfr-dev \
-            texinfo xz-utils zstd bzip2 cpio jq ca-certificates
 
-      - name: Clone matching PONWrt source
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gawk \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            zlib1g-dev \
+            python3 \
+            python3-setuptools \
+            python3-pyelftools \
+            python3-ply \
+            rsync \
+            unzip \
+            file \
+            wget \
+            curl \
+            subversion \
+            swig \
+            time \
+            patch \
+            perl \
+            autoconf \
+            automake \
+            autopoint \
+            libtool \
+            pkg-config \
+            cmake \
+            ninja-build \
+            g++-multilib \
+            gcc-multilib \
+            libgmp-dev \
+            libmpc-dev \
+            libmpfr-dev \
+            texinfo \
+            xz-utils \
+            zstd \
+            bzip2 \
+            cpio \
+            jq \
+            ca-certificates
+
+      # ==========================================================
+      # 2. 下载 PONWrt
+      # ==========================================================
+
+      - name: Clone PONWrt source
         run: |
-          git clone --filter=blob:none "$REPO_URL" openwrt
+          git clone --filter=blob:none \
+            "$REPO_URL" openwrt
+
           cd openwrt
+
           git checkout "$REPO_COMMIT"
-          echo "PONWrt: $(git rev-parse HEAD)"
+
           echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
+
+          git log -1 --oneline
+
+      # ==========================================================
+      # 3. 更新标准 feeds
+      # ==========================================================
 
       - name: Update standard feeds
         run: |
           cd "$OPENWRT_PATH"
-          # This project is a single package, not a standalone feed.
+
+          # 不将单独的 LuCI 仓库当作 feed
           sed -i '/^src-git adguardhome /d' feeds.conf.default
+
           ./scripts/feeds update -a
-          # Register feed package definitions; this does not compile them.
           ./scripts/feeds install -a
 
-      - name: Add LuCI package as local package
+      # ==========================================================
+      # 4. 下载 LuCI AdGuardHome 插件
+      # ==========================================================
+
+      - name: Add LuCI AdGuardHome package
         run: |
           cd "$OPENWRT_PATH"
-          git clone --depth=1 "$LUCI_REPO" package/luci-app-adguardhome
+
+          git clone --depth=1 \
+            "$LUCI_REPO" \
+            package/luci-app-adguardhome
+
           test -f package/luci-app-adguardhome/Makefile
-          grep -nE '^(PKG_NAME|PKG_VERSION|PKG_RELEASE|LUCI_DEPENDS|LUCI_PKGARCH)' \
-            package/luci-app-adguardhome/Makefile
-          # Ensure this is the UI-only variant of the source package.
-          grep -q 'PACKAGE_$(PKG_NAME)_INCLUDE_binary:adguardhome' \
-            package/luci-app-adguardhome/Makefile
 
-      - name: Configure only the LuCI package
-        run: |
-          cd "$OPENWRT_PATH"
-          cat > .config <<'EOF'
-          CONFIG_TARGET_airoha=y
-          CONFIG_TARGET_airoha_an7581=y
-          CONFIG_TARGET_MULTI_PROFILE=y
-          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y
-          CONFIG_USE_APK=y
-          CONFIG_PACKAGE_luci-app-adguardhome=m
-          # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
-          # CONFIG_PACKAGE_adguardhome is not set
-          EOF
-          make defconfig
+          echo "===== LuCI source revision ====="
 
-          echo '===== Effective configuration ====='
-          grep -E '^(CONFIG_TARGET_airoha=y|CONFIG_TARGET_airoha_an7581=y|CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y|CONFIG_USE_APK=y|CONFIG_PACKAGE_luci-app-adguardhome=m)$' .config || true
-          grep -q '^CONFIG_TARGET_airoha_an7581=y$' .config
-          grep -q '^CONFIG_USE_APK=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
-          if grep -q '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' .config; then
-            echo 'ERROR: AdGuardHome core dependency enabled'
-            exit 1
-          fi
-      - name: Remove AdGuardHome binary dependency
+          git -C package/luci-app-adguardhome \
+            log -1 --oneline
+
+      # ==========================================================
+      # 5. 修复 AdGuardHome 核心程序依赖
+      # 必须在 make defconfig 之前执行
+      # ==========================================================
+
+      - name: Remove AdGuardHome core dependency
         run: |
           cd "$OPENWRT_PATH"
 
@@ -98,88 +146,258 @@ jobs:
           from pathlib import Path
 
           p = Path("package/luci-app-adguardhome/Makefile")
+
           text = p.read_text()
 
           old = "+PACKAGE_$(PKG_NAME)_INCLUDE_binary:adguardhome"
 
           if text.count(old) != 1:
-              raise SystemExit("ERROR: Unexpected LuCI Makefile dependency")
+              raise SystemExit(
+                  "ERROR: Cannot locate the expected AdGuardHome dependency"
+              )
 
           text = text.replace(old, "")
+
           p.write_text(text)
 
-          print("AdGuardHome binary dependency removed")
+          print("Successfully removed AdGuardHome core dependency")
+
+          for line in text.splitlines():
+              if line.startswith("LUCI_DEPENDS"):
+                  print(line)
+
+          if old in p.read_text():
+              raise SystemExit("ERROR: Dependency removal failed")
           PY
 
+          # 清除旧的软件包元数据
+          rm -f tmp/.packageinfo
+          rm -f tmp/.packagedeps
+          rm -f tmp/.packageauxvars
+          rm -f tmp/.config-package.in
+          rm -f tmp/.packageinfo-*
 
+      # ==========================================================
+      # 6. 生成最小化配置
+      # ==========================================================
 
-      - name: Cache downloaded files
+      - name: Configure PONWrt
+        run: |
+          cd "$OPENWRT_PATH"
+
+          cat > .config <<'EOF'
+          CONFIG_TARGET_airoha=y
+          CONFIG_TARGET_airoha_an7581=y
+          CONFIG_USE_APK=y
+          CONFIG_PACKAGE_luci-app-adguardhome=m
+          # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
+          # CONFIG_PACKAGE_adguardhome is not set
+          # CONFIG_GOLANG_BUILD_BOOTSTRAP is not set
+          EOF
+
+          make defconfig
+
+          echo "===== Target configuration ====="
+
+          grep -E '^CONFIG_TARGET_airoha.*=y$' .config || true
+
+          echo "===== APK configuration ====="
+
+          grep -E \
+            '^CONFIG_USE_APK=|^CONFIG_PACKAGE_luci-app-adguardhome=' \
+            .config || true
+
+          grep -q '^CONFIG_TARGET_airoha_an7581=y$' .config
+          grep -q '^CONFIG_USE_APK=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
+
+          if grep -q \
+            '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' \
+            .config; then
+            echo "ERROR: AdGuardHome binary option enabled"
+            exit 1
+          fi
+
+          # 检查依赖是否已经进入生成的元数据
+          echo "===== Package metadata ====="
+
+          if grep -A 25 '^Package: luci-app-adguardhome$' \
+              tmp/.packageinfo 2>/dev/null \
+              | grep -Eq 'Depends:.*(^|[[:space:]])adguardhome([[:space:]]|$)'; then
+
+            echo "ERROR: Unexpected AdGuardHome core dependency"
+            exit 1
+          fi
+
+          echo "Configuration completed"
+
+      # ==========================================================
+      # 7. 缓存源码下载
+      # ==========================================================
+
+      - name: Cache downloaded sources
         uses: actions/cache@v4
         with:
           path: openwrt/dl
-          key: ponwrt-luci-dl-${{ runner.os }}-v1
+          key: ponwrt-luci-download-${{ runner.os }}-v2
           restore-keys: |
-            ponwrt-luci-dl-${{ runner.os }}-
+            ponwrt-luci-download-${{ runner.os }}-
 
-      - name: Build required OpenWrt host tools
+      # ==========================================================
+      # 8. 编译 OpenWrt 主机工具
+      # ==========================================================
+
+      - name: Build host tools
         run: |
           cd "$OPENWRT_PATH"
+
           set -o pipefail
-          make -j2 tools/install V=s 2>&1 | tee "$GITHUB_WORKSPACE/tools.log"
+
+          make -j2 tools/install V=s \
+            2>&1 | tee "$GITHUB_WORKSPACE/tools.log"
+
           test -x staging_dir/host/bin/openssl
           test -x staging_dir/host/bin/libdeflate-gzip
 
-      - name: Build target cross-toolchain
-        run: |
-          cd "$OPENWRT_PATH"
-          set -o pipefail
-          make -j2 toolchain/install V=s 2>&1 | tee "$GITHUB_WORKSPACE/toolchain.log"
+      # ==========================================================
+      # 9. 编译交叉工具链
+      # ==========================================================
 
-      - name: Build only luci-app-adguardhome APK
+      - name: Build cross-toolchain
         run: |
           cd "$OPENWRT_PATH"
+
           set -o pipefail
-          # No global 'make download' and no full-firmware 'make'.
-          make -j2 package/luci-app-adguardhome/compile V=s \
+
+          make -j2 toolchain/install V=s \
+            2>&1 | tee "$GITHUB_WORKSPACE/toolchain.log"
+
+      # ==========================================================
+      # 10. 仅编译 LuCI APK
+      # ==========================================================
+
+      - name: Build LuCI AdGuardHome APK
+        run: |
+          cd "$OPENWRT_PATH"
+
+          set -o pipefail
+
+          make -j2 \
+            package/luci-app-adguardhome/compile \
+            V=s \
             2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-      - name: Collect only the requested APK
+      # ==========================================================
+      # 11. 收集 APK
+      # ==========================================================
+
+      - name: Collect APK
         run: |
           mkdir -p "$GITHUB_WORKSPACE/output"
-          echo '===== Candidate files ====='
-          find "$OPENWRT_PATH/bin" -type f             \( -name '*adguardhome*.apk' -o -name '*adguardhome*.ipk' \)             -print || true
 
-          # APK uses hyphens for the version separator, unlike legacy IPK.
-          find "$OPENWRT_PATH/bin" -type f             -name 'luci-app-adguardhome-*.apk'             -exec cp -v '{}' "$GITHUB_WORKSPACE/output/" \;
+          echo "===== Generated files ====="
 
-          if ! find "$GITHUB_WORKSPACE/output" -maxdepth 1 -name '*.apk' -print -quit | grep -q .; then
-            echo 'ERROR: luci-app-adguardhome APK not generated.'
-            echo '===== Any APK files ====='
-            find "$OPENWRT_PATH/bin" -type f -name '*.apk' -print | head -80 || true
-            echo '===== Package build directory ====='
-            find "$OPENWRT_PATH/build_dir/target-aarch64_cortex-a53_musl" -maxdepth 4 -iname '*adguardhome*' -print 2>/dev/null || true
+          find "$OPENWRT_PATH/bin" \
+            -type f \
+            -iname '*adguardhome*.apk' \
+            -print
+
+          find "$OPENWRT_PATH/bin" \
+            -type f \
+            -name 'luci-app-adguardhome-*.apk' \
+            -exec cp -v {} "$GITHUB_WORKSPACE/output/" \;
+
+          COUNT=$(
+            find "$GITHUB_WORKSPACE/output" \
+              -maxdepth 1 \
+              -name '*.apk' \
+              | wc -l
+          )
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No LuCI AdGuardHome APK generated"
             exit 1
           fi
+
           cd "$GITHUB_WORKSPACE/output"
+
           sha256sum ./*.apk > SHA256SUMS
+
           ls -lh
+
+      # ==========================================================
+      # 12. 验证 APK 实际依赖
+      # ==========================================================
+
+      - name: Verify APK dependencies
+        run: |
+          cd "$OPENWRT_PATH"
+
+          APK_TOOL=""
+
+          for candidate in \
+            staging_dir/host/bin/apk \
+            staging_dir/hostpkg/bin/apk \
+            /usr/bin/apk; do
+
+            if [ -x "$candidate" ]; then
+              APK_TOOL="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$APK_TOOL" ]; then
+            echo "APK inspection tool unavailable"
+            echo "Package dependency verification cannot complete"
+            exit 1
+          fi
+
+          for pkg in "$GITHUB_WORKSPACE"/output/*.apk; do
+
+            echo "===== Inspecting $pkg ====="
+
+            "$APK_TOOL" adbdump "$pkg" \
+              > "$GITHUB_WORKSPACE/apk-metadata.txt"
+
+            cat "$GITHUB_WORKSPACE/apk-metadata.txt"
+
+            if grep -Ei \
+              'adguardhome[[:space:]]*(>=|=|>|<)' \
+              "$GITHUB_WORKSPACE/apk-metadata.txt"; then
+
+              echo "ERROR: APK still requires AdGuardHome core"
+              exit 1
+            fi
+
+          done
+
+          echo "APK dependency check completed"
+
+      # ==========================================================
+      # 13. 上传 APK
+      # ==========================================================
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: luci-app-adguardhome-ponwrt-apk
           path: output/
-          retention-days: 14
+          retention-days: 30
           if-no-files-found: error
 
-      - name: Upload build log on failure
-        if: failure()
+      # ==========================================================
+      # 14. 上传构建日志
+      # ==========================================================
+
+      - name: Upload build logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: luci-build-log
+          name: luci-adguardhome-build-logs
           path: |
             tools.log
             toolchain.log
             build.log
+            apk-metadata.txt
           retention-days: 7
           if-no-files-found: ignore
