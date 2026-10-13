@@ -99,6 +99,20 @@ jobs:
           restore-keys: |
             ponwrt-luci-dl-${{ runner.os }}-
 
+      - name: Build required OpenWrt host tools
+        run: |
+          cd "$OPENWRT_PATH"
+          set -o pipefail
+          make -j2 tools/install V=s 2>&1 | tee "$GITHUB_WORKSPACE/tools.log"
+          test -x staging_dir/host/bin/openssl
+          test -x staging_dir/host/bin/libdeflate-gzip
+
+      - name: Build target cross-toolchain
+        run: |
+          cd "$OPENWRT_PATH"
+          set -o pipefail
+          make -j2 toolchain/install V=s 2>&1 | tee "$GITHUB_WORKSPACE/toolchain.log"
+
       - name: Build only luci-app-adguardhome APK
         run: |
           cd "$OPENWRT_PATH"
@@ -131,6 +145,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: luci-build-log
-          path: build.log
+          path: |
+            tools.log
+            toolchain.log
+            build.log
           retention-days: 7
           if-no-files-found: ignore
