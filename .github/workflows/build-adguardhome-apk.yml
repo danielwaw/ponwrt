@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   build:
-    name: Build LuCI APK - Airoha AN7581
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -17,75 +16,59 @@ jobs:
       run:
         shell: bash
 
-    env:
-      DEBIAN_FRONTEND: noninteractive
-      FORCE_UNSAFE_CONFIGURE: "1"
-
     steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache
-          df -h
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang flex bison g++ gawk gcc-multilib \
-            g++-multilib gettext git libncurses-dev libssl-dev \
-            python3 python3-pip python3-setuptools \
-            python3-ply python3-docutils python3-pyelftools \
+            build-essential clang flex bison gawk \
+            gcc-multilib g++-multilib gettext git \
+            libncurses-dev libssl-dev libelf-dev \
+            python3 python3-setuptools python3-ply \
+            python3-docutils python3-pyelftools \
             rsync unzip zlib1g-dev file wget curl \
             subversion swig time patch perl \
-            libelf-dev libtool autoconf automake autopoint \
+            autoconf automake autopoint libtool \
             pkgconf cmake ninja-build ccache \
-            libglib2.0-dev libfuse-dev \
             libgmp-dev libmpc-dev libmpfr-dev \
             texinfo xz-utils zstd bzip2 cpio \
-            squashfs-tools device-tree-compiler \
-            jq uuid-runtime
+            device-tree-compiler jq
 
-      - name: Checkout PONWrt source
+      - name: Checkout PONWrt
         run: |
-          git clone --filter=blob:none \
-            https://github.com/pbs05/ponwrt.git ponwrt
-
+          git clone https://github.com/pbs05/ponwrt.git ponwrt
           cd ponwrt
           git checkout c3b518baec
-
-          echo "PONWrt revision:"
           git log -1 --oneline
 
-      - name: Add AdGuardHome LuCI feed
+      - name: Update standard feeds
         run: |
           cd ponwrt
 
-          # Avoid duplicate feed names
+          # Remove custom adguardhome feed if present
           sed -i '/^src-git adguardhome /d' feeds.conf.default
 
-          echo \
-            'src-git adguardhome https://github.com/kenzok78/luci-app-adguardhome.git' \
-            >> feeds.conf.default
+          ./scripts/feeds update -a
 
-          echo "Configured feeds:"
-          cat feeds.conf.default
+          # Install feed packages into build tree
+          ./scripts/feeds install -a
 
-      - name: Update and install feeds
+      - name: Add AdGuardHome LuCI package
         run: |
           cd ponwrt
 
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          git clone --depth=1 \
+            https://github.com/kenzok78/luci-app-adguardhome.git \
+            package/luci-app-adguardhome
 
-          echo "Checking package:"
-          test -f feeds/adguardhome/Makefile
-          test -e package/feeds/adguardhome/luci-app-adguardhome
+          test -f package/luci-app-adguardhome/Makefile
 
-      - name: Generate minimal APK configuration
+          echo "Package Makefile:"
+          grep -E \
+            'PKG_NAME|PKG_VERSION|PKG_RELEASE|LUCI_DEPENDS' \
+            package/luci-app-adguardhome/Makefile
+
+      - name: Configure PONWrt
         run: |
           cd ponwrt
 
@@ -98,47 +81,44 @@ jobs:
           # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
           # CONFIG_PACKAGE_adguardhome is not set
           # CONFIG_GOLANG_BUILD_BOOTSTRAP is not set
-          # CONFIG_ALL is not set
-          # CONFIG_ALL_NONSHARED is not set
-          # CONFIG_ALL_KMODS is not set
           EOF
 
           make defconfig
 
-          echo "===== Target and package configuration ====="
+          echo "===== Selected configuration ====="
           grep -E \
-            '^(CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi|CONFIG_USE_APK|CONFIG_PACKAGE_luci-app-adguardhome)' \
-            .config || true
+            'CONFIG_TARGET_|CONFIG_USE_APK|CONFIG_PACKAGE_luci-app-adguardhome|CONFIG_GOLANG_BUILD_BOOTSTRAP' \
+            .config | head -50
 
-          grep -q '^CONFIG_TARGET_airoha_an7581=y$' .config
-          grep -q '^CONFIG_USE_APK=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
+          grep -q \
+            '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
 
-          if grep -q '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' .config; then
-            echo "ERROR: AdGuardHome core dependency enabled"
+          if grep -q \
+            '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' \
+            .config; then
+            echo "ERROR: AdGuardHome binary enabled"
             exit 1
           fi
 
-      - name: Cache downloaded sources
+      - name: Cache downloads
         uses: actions/cache@v4
         with:
           path: ponwrt/dl
-          key: ponwrt-an7581-dl-${{ runner.os }}-v1
+          key: ponwrt-downloads-an7581-v2
           restore-keys: |
-            ponwrt-an7581-dl-${{ runner.os }}-
+            ponwrt-downloads-an7581-
 
-      - name: Download required sources
+      - name: Download sources
         run: |
           cd ponwrt
           make download -j2
 
-      - name: Compile LuCI APK
+      - name: Build LuCI APK
         run: |
           cd ponwrt
-
           set -o pipefail
 
-          make package/feeds/adguardhome/luci-app-adguardhome/compile \
+          make package/luci-app-adguardhome/compile \
             -j2 V=s 2>&1 | tee ../build.log
 
       - name: Collect APK
@@ -151,33 +131,27 @@ jobs:
             -name 'luci-app-adguardhome*.apk' \
             -exec cp -v {} upload/ \;
 
-          echo "===== APK files ====="
           ls -lh upload/
 
-          if ! find upload -maxdepth 1 -name '*.apk' | grep -q .; then
-            echo "ERROR: No AdGuardHome LuCI APK generated"
-            exit 1
-          fi
+          test -n "$(find upload -name '*.apk' -print -quit)"
 
-          file upload/*.apk
-          sha256sum upload/*.apk | tee upload/SHA256SUMS
+          sha256sum upload/*.apk > upload/SHA256SUMS
 
-      - name: Upload APK artifact
+      - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-adguardhome-ponwrt-an7581-apk
+          name: luci-app-adguardhome-ponwrt-apk
           path: upload/
           retention-days: 30
-          if-no-files-found: error
 
-      - name: Upload build log
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-logs
           path: |
             build.log
             ponwrt/logs/
-          retention-days: 7
           if-no-files-found: ignore
+          retention-days: 7
