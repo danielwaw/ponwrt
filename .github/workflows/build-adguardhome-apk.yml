@@ -90,6 +90,28 @@ jobs:
             echo 'ERROR: AdGuardHome core dependency enabled'
             exit 1
           fi
+      - name: Remove AdGuardHome binary dependency
+        run: |
+          cd "$OPENWRT_PATH"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("package/luci-app-adguardhome/Makefile")
+          text = p.read_text()
+
+          old = "+PACKAGE_$(PKG_NAME)_INCLUDE_binary:adguardhome"
+
+          if text.count(old) != 1:
+              raise SystemExit("ERROR: Unexpected LuCI Makefile dependency")
+
+          text = text.replace(old, "")
+          p.write_text(text)
+
+          print("AdGuardHome binary dependency removed")
+          PY
+
+
 
       - name: Cache downloaded files
         uses: actions/cache@v4
