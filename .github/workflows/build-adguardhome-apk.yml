@@ -68,14 +68,19 @@ jobs:
             'PKG_NAME|PKG_VERSION|PKG_RELEASE|LUCI_DEPENDS' \
             package/luci-app-adguardhome/Makefile
 
+      
       - name: Configure PONWrt
         run: |
           cd ponwrt
 
+          # Find actual Nokia XG-040G-MD UBI profile
+          echo "===== Nokia device profiles ====="
+          grep -R -n -i 'xg-040g-md' \
+            target/linux/airoha/image/ || true
+
           cat > .config <<'EOF'
           CONFIG_TARGET_airoha=y
           CONFIG_TARGET_airoha_an7581=y
-          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y
           CONFIG_USE_APK=y
           CONFIG_PACKAGE_luci-app-adguardhome=m
           # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
@@ -85,20 +90,33 @@ jobs:
 
           make defconfig
 
-          echo "===== Selected configuration ====="
+          echo "===== Selected target ====="
+          grep -E '^CONFIG_TARGET_airoha.*=y$' .config || true
+
+          echo "===== APK and LuCI package ====="
           grep -E \
-            'CONFIG_TARGET_|CONFIG_USE_APK|CONFIG_PACKAGE_luci-app-adguardhome|CONFIG_GOLANG_BUILD_BOOTSTRAP' \
-            .config | head -50
+            '^CONFIG_USE_APK=|^CONFIG_PACKAGE_luci-app-adguardhome=|^CONFIG_GOLANG_BUILD_BOOTSTRAP=' \
+            .config || true
 
-          grep -q \
-            '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
+          # Verify correct target architecture
+          grep -q '^CONFIG_TARGET_airoha_an7581=y$' .config
 
+          # Verify APK package format
+          grep -q '^CONFIG_USE_APK=y$' .config
+
+          # Verify LuCI package selected
+          grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
+
+          # Ensure AdGuardHome core is not enabled
           if grep -q \
             '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' \
             .config; then
-            echo "ERROR: AdGuardHome binary enabled"
+            echo "ERROR: AdGuardHome binary dependency enabled"
             exit 1
           fi
+
+          echo "Configuration verified successfully"
+
 
       - name: Cache downloads
         uses: actions/cache@v4
