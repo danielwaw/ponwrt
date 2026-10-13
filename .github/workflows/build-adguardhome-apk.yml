@@ -1,5 +1,4 @@
-
-name: Build PONWrt AdGuardHome LuCI APK
+name: Build PONWrt LuCI AdGuardHome APK
 
 on:
   workflow_dispatch:
@@ -7,169 +6,131 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: luci-adguardhome-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
     defaults:
       run:
         shell: bash
+    env:
+      REPO_URL: https://github.com/pbs05/ponwrt.git
+      REPO_COMMIT: c3b518baec
+      LUCI_REPO: https://github.com/kenzok78/luci-app-adguardhome.git
+      TZ: Asia/Shanghai
 
     steps:
-      - name: Install build dependencies
+      - name: Install build prerequisites
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential clang flex bison gawk \
-            gcc-multilib g++-multilib gettext git \
-            libncurses-dev libssl-dev libelf-dev \
-            python3 python3-setuptools python3-ply \
-            python3-docutils python3-pyelftools \
-            rsync unzip zlib1g-dev file wget curl \
-            subversion swig time patch perl \
-            autoconf automake autopoint libtool \
-            pkgconf cmake ninja-build ccache \
-            libgmp-dev libmpc-dev libmpfr-dev \
-            texinfo xz-utils zstd bzip2 cpio \
-            device-tree-compiler jq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison gawk gettext git \
+            libncurses-dev libssl-dev libelf-dev zlib1g-dev \
+            python3 python3-setuptools python3-pyelftools python3-ply \
+            rsync unzip file wget curl subversion swig time patch perl \
+            autoconf automake autopoint libtool pkg-config cmake ninja-build \
+            g++-multilib gcc-multilib libgmp-dev libmpc-dev libmpfr-dev \
+            texinfo xz-utils zstd bzip2 cpio jq ca-certificates
 
-      - name: Checkout PONWrt
+      - name: Clone matching PONWrt source
         run: |
-          git clone https://github.com/pbs05/ponwrt.git ponwrt
-          cd ponwrt
-          git checkout c3b518baec
-          git log -1 --oneline
+          git clone --filter=blob:none "$REPO_URL" openwrt
+          cd openwrt
+          git checkout "$REPO_COMMIT"
+          echo "PONWrt: $(git rev-parse HEAD)"
+          echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
 
       - name: Update standard feeds
         run: |
-          cd ponwrt
-
-          # Remove custom adguardhome feed if present
+          cd "$OPENWRT_PATH"
+          # This project is a single package, not a standalone feed.
           sed -i '/^src-git adguardhome /d' feeds.conf.default
-
           ./scripts/feeds update -a
-
-          # Install feed packages into build tree
+          # Register feed package definitions; this does not compile them.
           ./scripts/feeds install -a
 
-      - name: Add AdGuardHome LuCI package
+      - name: Add LuCI package as local package
         run: |
-          cd ponwrt
-
-          git clone --depth=1 \
-            https://github.com/kenzok78/luci-app-adguardhome.git \
-            package/luci-app-adguardhome
-
+          cd "$OPENWRT_PATH"
+          git clone --depth=1 "$LUCI_REPO" package/luci-app-adguardhome
           test -f package/luci-app-adguardhome/Makefile
-
-          echo "Package Makefile:"
-          grep -E \
-            'PKG_NAME|PKG_VERSION|PKG_RELEASE|LUCI_DEPENDS' \
+          grep -nE '^(PKG_NAME|PKG_VERSION|PKG_RELEASE|LUCI_DEPENDS|LUCI_PKGARCH)' \
+            package/luci-app-adguardhome/Makefile
+          # Ensure this is the UI-only variant of the source package.
+          grep -q 'PACKAGE_$(PKG_NAME)_INCLUDE_binary:adguardhome' \
             package/luci-app-adguardhome/Makefile
 
-      
-      - name: Configure PONWrt
+      - name: Configure only the LuCI package
         run: |
-          cd ponwrt
-
-          # Find actual Nokia XG-040G-MD UBI profile
-          echo "===== Nokia device profiles ====="
-          grep -R -n -i 'xg-040g-md' \
-            target/linux/airoha/image/ || true
-
+          cd "$OPENWRT_PATH"
           cat > .config <<'EOF'
           CONFIG_TARGET_airoha=y
           CONFIG_TARGET_airoha_an7581=y
+          CONFIG_TARGET_MULTI_PROFILE=y
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y
           CONFIG_USE_APK=y
           CONFIG_PACKAGE_luci-app-adguardhome=m
           # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
           # CONFIG_PACKAGE_adguardhome is not set
-          # CONFIG_GOLANG_BUILD_BOOTSTRAP is not set
           EOF
-
           make defconfig
 
-          echo "===== Selected target ====="
-          grep -E '^CONFIG_TARGET_airoha.*=y$' .config || true
-
-          echo "===== APK and LuCI package ====="
-          grep -E \
-            '^CONFIG_USE_APK=|^CONFIG_PACKAGE_luci-app-adguardhome=|^CONFIG_GOLANG_BUILD_BOOTSTRAP=' \
-            .config || true
-
-          # Verify correct target architecture
+          echo '===== Effective configuration ====='
+          grep -E '^(CONFIG_TARGET_airoha=y|CONFIG_TARGET_airoha_an7581=y|CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y|CONFIG_USE_APK=y|CONFIG_PACKAGE_luci-app-adguardhome=m)$' .config || true
           grep -q '^CONFIG_TARGET_airoha_an7581=y$' .config
-
-          # Verify APK package format
           grep -q '^CONFIG_USE_APK=y$' .config
-
-          # Verify LuCI package selected
           grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=m$' .config
-
-          # Ensure AdGuardHome core is not enabled
-          if grep -q \
-            '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' \
-            .config; then
-            echo "ERROR: AdGuardHome binary dependency enabled"
+          if grep -q '^CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y$' .config; then
+            echo 'ERROR: AdGuardHome core dependency enabled'
             exit 1
           fi
 
-          echo "Configuration verified successfully"
-
-
-      - name: Cache downloads
+      - name: Cache downloaded files
         uses: actions/cache@v4
         with:
-          path: ponwrt/dl
-          key: ponwrt-downloads-an7581-v2
+          path: openwrt/dl
+          key: ponwrt-luci-dl-${{ runner.os }}-v1
           restore-keys: |
-            ponwrt-downloads-an7581-
+            ponwrt-luci-dl-${{ runner.os }}-
 
-      - name: Download sources
+      - name: Build only luci-app-adguardhome APK
         run: |
-          cd ponwrt
-          make download -j2
-
-      - name: Build LuCI APK
-        run: |
-          cd ponwrt
+          cd "$OPENWRT_PATH"
           set -o pipefail
+          # No global 'make download' and no full-firmware 'make'.
+          make -j2 package/luci-app-adguardhome/compile V=s \
+            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-          make package/luci-app-adguardhome/compile \
-            -j2 V=s 2>&1 | tee ../build.log
-
-      - name: Collect APK
-        if: success()
+      - name: Collect only the requested APK
         run: |
-          mkdir -p upload
-
-          find ponwrt/bin/packages \
-            -type f \
-            -name 'luci-app-adguardhome*.apk' \
-            -exec cp -v {} upload/ \;
-
-          ls -lh upload/
-
-          test -n "$(find upload -name '*.apk' -print -quit)"
-
-          sha256sum upload/*.apk > upload/SHA256SUMS
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find "$OPENWRT_PATH/bin/packages" -type f \
+            -name 'luci-app-adguardhome_*.apk' \
+            -exec cp -v '{}' "$GITHUB_WORKSPACE/output/" \;
+          test -n "$(find "$GITHUB_WORKSPACE/output" -maxdepth 1 -name '*.apk' -print -quit)"
+          cd "$GITHUB_WORKSPACE/output"
+          sha256sum ./*.apk > SHA256SUMS
+          ls -lh
 
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: luci-app-adguardhome-ponwrt-apk
-          path: upload/
-          retention-days: 30
+          path: output/
+          retention-days: 14
+          if-no-files-found: error
 
-      - name: Upload build logs
-        if: always()
+      - name: Upload build log on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: |
-            build.log
-            ponwrt/logs/
-          if-no-files-found: ignore
+          name: luci-build-log
+          path: build.log
           retention-days: 7
+          if-no-files-found: ignore
